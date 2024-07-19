@@ -6,8 +6,14 @@ import cv2
 from PIL import Image
 import subprocess
 from fastapi import FastAPI, UploadFile, File, HTTPException
-#from PassportEye.passporteye.util.pdf import extract_first_jpeg_in_pdf 
+from fastapi.middleware.cors import CORSMiddleware
+#from PassportEye.passporteye.util.pdf import extract_first_jpeg_in_pdf
 from skimage import io as skimage_io, transform
+import nltk
+from nltk.corpus import names
+from nltk.metrics import edit_distance
+
+nltk.download('names')
 
 class Loader:
     def __init__(self, file=None):
@@ -20,7 +26,7 @@ class Loader:
                 #    img_data = extract_first_jpeg_in_pdf(f)
                 #if img_data is None:
                     return None
-                return skimage_io.imread(img_data, as_gray=False)
+                #return skimage_io.imread(img_data, as_gray=False)
             else:
                 return skimage_io.imread(self.file, as_gray=False)
         elif isinstance(self.file, (bytes, io.IOBase)):
@@ -130,6 +136,7 @@ def stringify_date(text, date_type):
         year += 1900 if year > current_year else 2000
 
     return f"{day}/{month}/{year}"
+
 def my_trim(input_str):
     return input_str.replace('<', ' ').strip()
 
@@ -158,14 +165,37 @@ def get_content(image):
     except subprocess.CalledProcessError as e:
         return str(e)
 
+def correct_name(name):
+    common_names = names.words('male.txt') + names.words('female.txt')
+    distances = [(edit_distance(name.lower(), common_name.lower()), common_name) for common_name in common_names]
+    closest_name = min(distances, key=lambda x: x[0])[1]
+    return closest_name.capitalize()
+
+def eliminate_repeated_letters(name):
+    counts = {}
+    result = []
+
+    for char in name:
+        if char.isalpha():
+            counts[char] = counts.get(char, 0) + 1
+            if counts[char] <= 2:
+                result.append(char)
+
+    return ''.join(result)
+
 class OCRAdapter:
     def parse_document(self, image):
         text = get_content(image)
         if not text:
             raise ValueError("OCR failed to extract content")
-
+        
+        corrected_first_name = eliminate_repeated_letters("prénom à corriger")
+        corrected_last_name = eliminate_repeated_letters("nom à corriger")
+        
         mrz_text = [line.strip() for line in text.split('\n') if line.count('<') > 5]
-        return parse_mrz('\n'.join(mrz_text))
+        document = parse_mrz('\n'.join(mrz_text))
+
+        return document.to_dict()
 
 class APIPort:
     def get_document_data(self, filepath):
@@ -173,6 +203,19 @@ class APIPort:
         return adapter.parse_document(filepath)
 
 app = FastAPI()
+
+origins = [
+    "http://localhost",
+    "http://localhost:8000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.post("/get-document-data/")
 async def get_document_data(file: UploadFile = File(...)):
@@ -184,7 +227,7 @@ async def get_document_data(file: UploadFile = File(...)):
         api_port = APIPort()
         document = api_port.get_document_data("temp_image")
         
-        return document.to_dict()
+        return document
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -193,9 +236,8 @@ class OCRScannerPort:
         adapter = OCRAdapter()
         return adapter.parse_document(image)
 
-# Example usage
 if __name__ == "__main__":
-    file_path = "path_to_image_or_pdf"
+    file_path = "chemin_vers_image_ou_pdf"
     
     loader = Loader(file=file_path)
     img = loader()
@@ -203,42 +245,35 @@ if __name__ == "__main__":
     if img is not None:
         scaler = Scaler(max_width=250)
         img_small, scale_factor = scaler(img)
-        print("Image scaled successfully")
+        print("Image redimensionnée avec succès")
     else:
-        print("Failed to load image")
+        print("Échec du chargement de l'image")
 
-# Retourne une image binarisée
 def getNBImage(img):
-    # Transformation d'une image couleur en une image en noir et blanc
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     img = img.astype(np.uint8)
 
-    # Réduction du bruit
     dst = cv2.fastNlMeansDenoising(img, None, 8, 7, 21)
 
-    # Binarisation de l'image
     ret, thresh = cv2.threshold(dst, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     return np.invert(thresh)
-
 
 def crop_image(im):
     width, height = im.size
 
-    
     startx = 0
     starty = height * 0.75
     endx = width * 0.5
     endy = height
     cropImageCE = getNBImage(np.asarray(im.crop((int(startx), int(starty), int(endx), int(endy)))))
 
-    
     startx = 0
     starty = 0
     endx = width
     endy = height * 0.30
     cropImageTOP = getNBImage(np.asarray(im.crop((int(startx), int(starty), int(endx), int(endy)))))
 
-    
+
     startx = 0
     starty = height * 0.75
     endx = width
@@ -247,37 +282,30 @@ def crop_image(im):
 
     return cropImageCE, cropImageTOP, cropImageBOT
 
-# Fonction de récupération et sauvegarde du texte retrouvé par l'ocr (tesseract)
 def get_text(folder, folder_base):
     outputFolder = folder
     for file in os.listdir(folder_base):
         if file.endswith(".jpg"):
             file_path = os.path.join(folder_base, file)
             
-            # Chargement et redimensionnement de l'image
             loader = Loader(file=file_path)
             img = loader()
             if img is not None:
                 scaler = Scaler(max_width=250)
                 img_small, scale_factor = scaler(img)
                 
-                # Conversion de l'image redimensionnée en PIL Image
                 im = Image.fromarray((img_small * 255).astype(np.uint8))
                 
-                # Découper l'image en trois morceaux
                 cropImageCE, cropImageTOP, cropImageBOT = crop_image(im)
                 
-                # Sauvegarder les images découpées
                 Image.fromarray(cropImageCE).save('cropCE.jpg')
                 Image.fromarray(cropImageTOP).save('cropTOP.jpg')
                 Image.fromarray(cropImageBOT).save('cropBOT.jpg')
                 
-                # Passage de l'ocr tesseract sur les images
                 os.system('tesseract cropCE.jpg ' + os.path.join(outputFolder, file + "CE"))
                 os.system('tesseract cropTOP.jpg ' + os.path.join(outputFolder, file + "TOP"))
                 os.system('tesseract cropBOT.jpg ' + os.path.join(outputFolder, file + "BOT"))
                 
-    # Suppression des fichiers temporaires
     os.remove("cropCE.jpg")
     os.remove("cropTOP.jpg")
     os.remove("cropBOT.jpg")
