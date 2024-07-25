@@ -1,25 +1,29 @@
-# Utilisez une image de base officielle de Python
-FROM python:3.9-slim
+# Use the official Python image from the Docker Hub
+FROM python:3.11-slim
 
-# Installer Tesseract
+# Install Tesseract OCR
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
-    libtesseract-dev
+    libtesseract-dev \
+    && apt-get clean
 
-# Définissez le répertoire de travail
+# Set environment variables to avoid Python buffering
+ENV PYTHONUNBUFFERED=1
+
+# Set the working directory in the container
 WORKDIR /app
 
-# Copiez le fichier requirements.txt dans le conteneur
-COPY requirements.txt .
+# Copy the dependencies file to the working directory
+COPY requirements.txt /app/
 
-# Installez les dépendances Python
+# Install any dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiez le reste des fichiers de l'application dans le conteneur
-COPY . .
+# Copy the rest of the application code to the working directory
+COPY . /app/
 
-# Exposez le port sur lequel FastAPI fonctionnera
+# Expose the port the app runs on
 EXPOSE 8000
 
-# Définissez la commande pour démarrer l'application FastAPI
+# Command to run the application
 CMD ["uvicorn", "ysf:app", "--host", "0.0.0.0", "--port", "8000"]
